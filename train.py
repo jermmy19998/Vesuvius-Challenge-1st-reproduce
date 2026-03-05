@@ -17,8 +17,8 @@ from source.train.train_cmd import run_nnunet_train
 def parse_args():
     here = THIS_DIR
     parser = argparse.ArgumentParser("Vesuvius Surface Detection - Train Only")
-    parser.add_argument("--working_dir", type=str, default="/mnt/raid/zanzhuheng/working/vesuvius/work")
-    parser.add_argument("--output_dir", type=str, default="/mnt/raid/zanzhuheng/working/vesuvius/output")
+    parser.add_argument("--working_dir", type=str, default="./work")
+    parser.add_argument("--output_dir", type=str, default="./output")
     parser.add_argument(
         "--active_train_yaml",
         type=str,
@@ -147,3 +147,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

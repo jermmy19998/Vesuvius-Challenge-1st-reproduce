@@ -22,9 +22,9 @@ Per request:
 
 ```bash
 python source/preprocess.py \
-  --input_dir /mnt/raid/zanzhuheng/working/vesuvius/data \
-  --working_dir /mnt/raid/zanzhuheng/working/vesuvius/work \
-  --output_dir /mnt/raid/zanzhuheng/working/vesuvius/output \
+  --input_dir ./data \
+  --working_dir ./work \
+  --output_dir ./output \
   --modes 1,2,5,7 \
   --num_workers 8
 ```
@@ -33,8 +33,8 @@ python source/preprocess.py \
 
 ```bash
 python source/train.py \
-  --working_dir /mnt/raid/zanzhuheng/working/vesuvius/work \
-  --output_dir /mnt/raid/zanzhuheng/working/vesuvius/output \
+  --working_dir ./work \
+  --output_dir ./output \
   --modes 1,2,5,7
 ```
 
@@ -68,3 +68,4 @@ python source/infer.py \
   - `close_perp=7`
 - The final submission file is `<output_dir>/submission.zip`.
 - `working_dir` is scratch space for intermediate files (`test_input`, per-mode `npz`, temporary TIFFs).
+
