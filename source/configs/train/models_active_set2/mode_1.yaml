@@ -1,0 +1,8 @@
+mode: 1
+tag: MPlans_4000_patch128
+planner: nnUNetPlannerResEncM
+plans_name: nnUNetResEncUNetMPlans
+trainer: nnUNetTrainer_4000epochs
+patch_size: 128
+batch_size: 2
+pretrained_from_mode: null

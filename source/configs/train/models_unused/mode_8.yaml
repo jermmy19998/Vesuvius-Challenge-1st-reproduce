@@ -1,0 +1,8 @@
+mode: 8
+tag: LPlans_4000_patch224_fromscratch
+planner: nnUNetPlannerResEncL
+plans_name: nnUNetResEncUNetLPlans
+trainer: nnUNetTrainer_4000epochs
+patch_size: 224
+batch_size: 2
+pretrained_from_mode: null
