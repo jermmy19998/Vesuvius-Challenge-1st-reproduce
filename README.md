@@ -52,6 +52,31 @@ python source/infer.py \
   --gpu_ids 0,1
 ```
 
+## Args Quick Reference
+
+- `preprocess.py`
+- `--input_dir`: Dataset root used for preprocessing. Default: `./data`.
+- `--working_dir`: Intermediate workspace (nnUNet raw/preprocessed scratch). Default: `./work`.
+- `--output_dir`: Output root for generated assets/logs. Default: `./output`.
+- `--modes`: Comma-separated mode list to prepare, for example `1,2,5,7`.
+- `--num_workers`: Worker count for preprocessing. Default: `8`.
+
+- `train.py`
+- `--working_dir`: Preprocessed data workspace. Default: `./work`.
+- `--output_dir`: Output root for training artifacts. Default: `./output`.
+- `--modes`: Comma-separated mode list to train.
+- `--configuration`: nnUNet configuration name. Default: `3d_fullres`.
+- `--fold`: Fold selection. Default: `all`.
+
+- `infer.py` (main)
+- `--input_dir`: Test data root (expects `test_images`). Default: `./data`.
+- `--working_dir`: Inference scratch directory. Default: `./tmp/vesuvius_multi_scratch`.
+- `--output_dir`: Final outputs (`submission.zip` and slice PNG grids). Default: `./output`.
+- `--models_results_dir`: Model directory. Empty means `<output_dir>/nnUNet_results`.
+- `--active_modes`: Inference modes. Default: `7,5,2,1`.
+- `--gpu_ids`: GPU list like `0,1`; empty means auto detect.
+- `--prob_threshold`: Binary mask threshold. Default: `0.26`.
+- `--fusion_scheme`: `DIRECT_WEIGHTED` or `PAIR_ENSEMBLE`.
 ## Notes
 
 - Inference weights and threshold follow the referenced notebook:
@@ -68,4 +93,5 @@ python source/infer.py \
   - `close_perp=7`
 - The final submission file is `<output_dir>/submission.zip`.
 - `working_dir` is scratch space for intermediate files (`test_input`, per-mode `npz`, temporary TIFFs).
+
 
