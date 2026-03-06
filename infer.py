@@ -53,8 +53,12 @@ def _in_notebook_runtime() -> bool:
 def parse_args(argv: Optional[list[str]] = None):
     parser = argparse.ArgumentParser("Vesuvius Surface Detection - Inference Reproduction")
     parser.add_argument("--input_dir", type=str, default="/kaggle/input/vesuvius-challenge-surface-detection")
-    parser.add_argument("--working_dir", type=str, default="/kaggle/working")
-    parser.add_argument("--output_dir", type=str, default="/kaggle/working")
+    parser.add_argument(
+        "--working_dir",
+        type=str,
+        default="/kaggle/working",
+        help="Unified output root. Stores temporary inference files, debug artifacts, PNG grids, and submission.zip.",
+    )
     parser.add_argument(
         "--weight_dir",
         type=str,
@@ -1603,7 +1607,7 @@ def _parse_int_csv(raw: str) -> list[int]:
 def run_inference_pipeline(args):
     input_dir = Path(args.input_dir).resolve()
     working_dir = Path(args.working_dir).resolve()
-    output_dir = Path(args.output_dir).resolve()
+    output_dir = working_dir
     output_dir.mkdir(parents=True, exist_ok=True)
     weight_dir = Path(args.weight_dir).resolve() if str(args.weight_dir).strip() else (output_dir / "nnUNet_results")
     if str(args.models_results_dir).strip():
