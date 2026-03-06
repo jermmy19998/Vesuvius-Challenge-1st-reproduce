@@ -54,7 +54,7 @@ def run_nnunet_train(
     pretrained_weights: Optional[Path],
     timeout_sec: Optional[int],
     logs_dir: Optional[Path],
-) -> bool:
+) -> tuple[bool, str]:
     exe = resolve_command("nnUNetv2_train")
     cmd: list[str] = [
         exe,
@@ -70,7 +70,7 @@ def run_nnunet_train(
         cmd.extend(["-pretrained_weights", str(pretrained_weights)])
 
     total_epochs = _trainer_total_epochs(trainer)
-    ok, _ = run_command(
+    ok, merged = run_command(
         cmd=cmd,
         name="Training",
         timeout_sec=timeout_sec,
@@ -90,4 +90,4 @@ def run_nnunet_train(
         ],
         shell=False,
     )
-    return ok
+    return ok, merged
