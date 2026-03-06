@@ -46,6 +46,22 @@ except Exception:  # pragma: no cover
 STRUCT_3X3X3 = np.ones((3, 3, 3), dtype=np.uint8)
 
 
+def _get_cupyx_ndimage_or_raise():
+    if cupy is None or cupyx is None:
+        raise RuntimeError(
+            "GPU postprocess is required, but cupy/cupyx is unavailable. "
+            "Install a compatible CuPy build in this environment."
+        )
+    try:
+        import cupyx.scipy.ndimage as ndimage_mod
+    except Exception as e:
+        raise RuntimeError(
+            "GPU postprocess is required, but cupyx.scipy.ndimage is unavailable. "
+            "Please install a CuPy package compatible with the notebook CUDA runtime."
+        ) from e
+    return ndimage_mod
+
+
 def _in_notebook_runtime() -> bool:
     return ("ipykernel" in sys.modules) or bool(os.environ.get("JPY_PARENT_PID"))
 
@@ -1140,8 +1156,7 @@ EULER_COEFS3D_26_NP = np.array(
 
 
 def cupy_euler_number(image, connectivity: int):
-    if cupy is None or cupyx is None:
-        raise RuntimeError("cupy is not available")
+    ndimage = _get_cupyx_ndimage_or_raise()
     image_cp = cupy.asarray(image)
     image_cp = (image_cp > 0).astype(int)
     image_cp = cupy.pad(image_cp, pad_width=1, mode="constant")
@@ -1159,7 +1174,7 @@ def cupy_euler_number(image, connectivity: int):
         ]
     )
     coefs = cupy.asarray(EULER_COEFS3D_26_NP[::-1] if connectivity == 1 else EULER_COEFS3D_26_NP)
-    xf = cupyx.scipy.ndimage.convolve(image_cp, config, mode="constant", cval=0)
+    xf = ndimage.convolve(image_cp, config, mode="constant", cval=0)
     h = cupy.bincount(xf.ravel(), minlength=256)
     return int((0.125 * coefs @ h).item())
 
@@ -1343,10 +1358,9 @@ def plug_small_holes(in_vol: np.ndarray, lut):
 
 
 def plug_small_holes_cupy(in_vol, lut):
-    if cupy is None or cupyx is None:
-        raise RuntimeError("cupy is not available")
+    ndimage = _get_cupyx_ndimage_or_raise()
     dilation_struct = cupy.asarray(sk_morphology.footprint_rectangle((3, 3, 3)))
-    dilated_vol = cupyx.scipy.ndimage.binary_dilation(in_vol, dilation_struct)
+    dilated_vol = ndimage.binary_dilation(in_vol, dilation_struct)
 
     z_locs, y_locs, x_locs = [cupy.asnumpy(a).astype(np.int64) for a in cupy.nonzero(dilated_vol)]
     out_vol = cupy.asnumpy(in_vol).astype(np.uint32, copy=True)
@@ -1482,8 +1496,7 @@ def _postprocess_cpu(in_vol: np.ndarray, params: dict) -> np.ndarray:
 
 
 def _postprocess_cupy(in_vol: np.ndarray, params: dict) -> np.ndarray:
-    if cupy is None or cupyx is None:
-        raise RuntimeError("cupy is not available")
+    ndimage = _get_cupyx_ndimage_or_raise()
 
     in_vol = in_vol.astype(np.uint8).copy()
     bw = int(params["border_width"])
@@ -1497,7 +1510,7 @@ def _postprocess_cupy(in_vol: np.ndarray, params: dict) -> np.ndarray:
     )
 
     struct_element333 = cupy.asarray(sk_morphology.footprint_rectangle((3, 3, 3)))
-    sheet_labels_vol, num_sheets = cupyx.scipy.ndimage.label(cupy.asarray(pruned_vol), struct_element333)
+    sheet_labels_vol, num_sheets = ndimage.label(cupy.asarray(pruned_vol), struct_element333)
 
     out_vol = cupy.zeros(in_vol.shape, dtype=np.uint8)
     sheet_vol = cupy.empty(sheet_labels_vol.shape, dtype=np.uint8)
@@ -1540,7 +1553,7 @@ def _postprocess_cupy(in_vol: np.ndarray, params: dict) -> np.ndarray:
 
         sheet_vol_closed = cupy.maximum(
             sheet_vol,
-            cupyx.scipy.ndimage.binary_closing(sheet_vol, close_elem).astype(np.uint8),
+            ndimage.binary_closing(sheet_vol, close_elem).astype(np.uint8),
         )
 
         patches, _ = get_hole_patches(cupy.asnumpy(sheet_vol_closed), proj_axis, cupy.asnumpy(proj_mask), params)
@@ -1552,7 +1565,7 @@ def _postprocess_cupy(in_vol: np.ndarray, params: dict) -> np.ndarray:
             )
             sheet_vol_patched = cupy.maximum(
                 sheet_vol_patched,
-                cupyx.scipy.ndimage.binary_closing(sheet_vol_patched, close_elem).astype(np.uint8),
+                ndimage.binary_closing(sheet_vol_patched, close_elem).astype(np.uint8),
             )
 
         sheet_vol_fixed, _ = plug_small_holes_cupy(sheet_vol_patched, lut)
@@ -1566,10 +1579,10 @@ def _postprocess_cupy(in_vol: np.ndarray, params: dict) -> np.ndarray:
             if num_holes_after > num_holes_before:
                 sheet_vol_fixed = sheet_vol_nopatch
 
-        occupied = cupyx.scipy.ndimage.binary_dilation((out_vol != 0), struct_element333)
+        occupied = ndimage.binary_dilation((out_vol != 0), struct_element333)
         out_vol[cupy.where((sheet_vol_fixed != 0) & (occupied == 0))] = sheet_idx
 
-    out_vol = cupyx.scipy.ndimage.binary_fill_holes(out_vol).astype(cupy.uint8)
+    out_vol = ndimage.binary_fill_holes(out_vol).astype(cupy.uint8)
     if bw > 0:
         out_vol[0:bw, :, :] = out_vol[:, 0:bw, :] = out_vol[:, :, 0:bw] = 0
         out_vol[-bw:, :, :] = out_vol[:, -bw:, :] = out_vol[:, :, -bw:] = 0
@@ -1577,9 +1590,12 @@ def _postprocess_cupy(in_vol: np.ndarray, params: dict) -> np.ndarray:
 
 
 def postprocess(in_vol: np.ndarray, params: dict, use_cupy_postprocess: bool) -> np.ndarray:
-    if use_cupy_postprocess and cupy is not None and cupyx is not None:
-        return _postprocess_cupy(in_vol, params)
-    return _postprocess_cpu(in_vol, params)
+    if not use_cupy_postprocess:
+        raise RuntimeError(
+            "CPU postprocess is disabled by policy. "
+            "Run with --use_cupy_postprocess and a working GPU CuPy environment."
+        )
+    return _postprocess_cupy(in_vol, params)
 
 
 def _chunked(seq: list[Path], k: int) -> list[list[Path]]:
@@ -1635,6 +1651,12 @@ def run_inference_pipeline(args):
     zip_tiff_immediately = bool(args.zip_tiff_immediately)
     emulate_float16_maps = bool(args.emulate_float16_maps)
     use_cupy_postprocess = bool(args.use_cupy_postprocess)
+    if not use_cupy_postprocess:
+        raise RuntimeError(
+            "GPU-only mode requires --use_cupy_postprocess. "
+            "Do not disable it."
+        )
+    _get_cupyx_ndimage_or_raise()
     npp = int(args.npp)
     nps = int(args.nps)
     prob_t = float(args.prob_threshold)
@@ -1837,11 +1859,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
-
