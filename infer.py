@@ -52,14 +52,20 @@ def _in_notebook_runtime() -> bool:
 
 def parse_args(argv: Optional[list[str]] = None):
     parser = argparse.ArgumentParser("Vesuvius Surface Detection - Inference Reproduction")
-    parser.add_argument("--input_dir", type=str, default="./data")
-    parser.add_argument("--working_dir", type=str, default="./tmp/vesuvius_multi_scratch")
-    parser.add_argument("--output_dir", type=str, default="./output")
+    parser.add_argument("--input_dir", type=str, default="/kaggle/input/vesuvius-challenge-surface-detection")
+    parser.add_argument("--working_dir", type=str, default="/kaggle/working")
+    parser.add_argument("--output_dir", type=str, default="/kaggle/working")
+    parser.add_argument(
+        "--weight_dir",
+        type=str,
+        default="/kaggle/input/datasets/seeingtimes/1st-reproduce-test",
+        help="Directory that stores trained nnUNet model folders (kept separate from temp/output).",
+    )
     parser.add_argument(
         "--models_results_dir",
         type=str,
         default="",
-        help="Directory that stores trained nnUNet models. Empty means <output_dir>/nnUNet_results.",
+        help="Deprecated alias of --weight_dir. If set, it overrides --weight_dir.",
     )
     parser.add_argument(
         "--active_modes",
@@ -499,7 +505,20 @@ def register_model(spec: InferModelSpec, nnunet_results: Path, configuration: st
 
 
 def list_all_test_tifs(input_dir: Path) -> list[Path]:
-    test_images_dir = input_dir / "test_images"
+    if input_dir.name == "test_images" and input_dir.is_dir():
+        test_images_dir = input_dir
+    elif (input_dir / "test_images").is_dir():
+        test_images_dir = input_dir / "test_images"
+    else:
+        candidates = sorted(p for p in input_dir.rglob("test_images") if p.is_dir())
+        if len(candidates) == 1:
+            test_images_dir = candidates[0]
+        else:
+            raise RuntimeError(
+                f"cannot resolve test_images folder from input_dir={input_dir}. "
+                "Please pass dataset root containing test_images/ or pass test_images directly."
+            )
+    log(f"resolved test_images_dir={test_images_dir}")
     tifs = sorted(test_images_dir.glob("*.tif"))
     log(f"found test cases: {len(tifs)}")
     if not tifs:
@@ -1586,11 +1605,15 @@ def run_inference_pipeline(args):
     working_dir = Path(args.working_dir).resolve()
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    models_results_dir = (
-        Path(args.models_results_dir).resolve()
-        if str(args.models_results_dir).strip()
-        else (output_dir / "nnUNet_results")
-    )
+    weight_dir = Path(args.weight_dir).resolve() if str(args.weight_dir).strip() else (output_dir / "nnUNet_results")
+    if str(args.models_results_dir).strip():
+        models_results_dir = Path(args.models_results_dir).resolve()
+    else:
+        models_results_dir = weight_dir
+    if (models_results_dir / "nnUNet_results").is_dir() and not any(models_results_dir.glob("Dataset*_VesuviusSurface_M*")):
+        models_results_dir = models_results_dir / "nnUNet_results"
+    if not models_results_dir.exists():
+        raise FileNotFoundError(f"weight/models_results directory not found: {models_results_dir}")
 
     configuration = str(args.configuration)
     fold = str(args.fold)
@@ -1640,6 +1663,7 @@ def run_inference_pipeline(args):
     log(f"input_dir={input_dir}")
     log(f"working_dir={working_dir}")
     log(f"output_dir={output_dir}")
+    log(f"weight_dir={weight_dir}")
     log(f"models_results_dir={models_results_dir}")
     log(f"active_modes={active_modes}")
     log(f"fusion_scheme={fusion_scheme}")
@@ -1650,9 +1674,9 @@ def run_inference_pipeline(args):
     log(f"tmp_root={tmp_root}")
 
     paths = setup_nnunet_environment(working_dir=working_dir, compile_flag="false")
-    test_input_dir = working_dir / "test_input"
-    final_tiff_dir = working_dir / "predictions_tiff"
-    pred_dirs = {m: working_dir / f"nnunet_out_m{m}" for m in active_modes}
+    test_input_dir = output_dir / "tmp_test_input"
+    final_tiff_dir = output_dir / "tmp_predictions_tiff"
+    pred_dirs = {m: output_dir / f"tmp_nnunet_out_m{m}" for m in active_modes}
     sub_zip = output_dir / zip_name
 
     def _disk(tag: str):
@@ -1718,6 +1742,7 @@ def run_inference_pipeline(args):
             log(f"chunk {ci}/{len(chunks)} | cases={len(chunk_tifs)}")
 
             case_ids = prepare_test_data_subset(chunk_tifs, test_input_dir=test_input_dir)
+            case_tif_map = {p.stem: p for p in chunk_tifs}
             for p in pred_dirs.values():
                 _safe_clean_dir(p)
 
@@ -1755,7 +1780,7 @@ def run_inference_pipeline(args):
                 )
                 mask = (p >= prob_t).astype(np.uint8)
                 pp_mask = postprocess(mask, pp_params, use_cupy_postprocess=use_cupy_postprocess)
-                original_tif_path = input_dir / "test_images" / f"{cid}.tif"
+                original_tif_path = case_tif_map.get(cid, input_dir / "test_images" / f"{cid}.tif")
                 if original_tif_path.exists():
                     original_volume = tifffile.imread(original_tif_path)
                     grid_png_path = output_dir / f"{cid}_slices_grid.png"
