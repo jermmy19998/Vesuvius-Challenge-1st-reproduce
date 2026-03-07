@@ -1,7 +1,7 @@
 import argparse
 import re
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any, Optional
 
@@ -38,8 +38,8 @@ def parse_args():
         type=str,
         default="",
         help=(
-            "Comma-separated GPU ids. If count equals mode count, train modes in parallel "
-            "(one mode per GPU). Otherwise train sequentially in modes order."
+            "Comma-separated GPU ids. Runs up to len(gpu_ids) modes in parallel; "
+            "remaining modes wait in queue."
         ),
     )
     parser.add_argument("--configuration", type=str, default="3d_fullres")
@@ -64,6 +64,7 @@ def _parse_gpu_ids(raw: str) -> list[int]:
     if not value:
         return []
     gpu_ids: list[int] = []
+    seen: set[int] = set()
     for item in value.split(","):
         token = item.strip()
         if not token:
@@ -71,6 +72,9 @@ def _parse_gpu_ids(raw: str) -> list[int]:
         gpu_id = int(token)
         if gpu_id < 0:
             raise ValueError(f"gpu id must be >= 0, got: {gpu_id}")
+        if gpu_id in seen:
+            raise ValueError(f"duplicate gpu id is not allowed: {gpu_id}")
+        seen.add(gpu_id)
         gpu_ids.append(gpu_id)
     return gpu_ids
 
@@ -408,6 +412,80 @@ def _train_one_mode(
             _finish_swanlab_run(swanlab_mod, swanlab_run)
 
 
+def _run_parallel_with_gpu_queue(
+    args,
+    modes: list[int],
+    specs: dict[int, TrainModelSpec],
+    paths,
+    timeout_sec: Optional[int],
+    logs_dir: Path,
+    gpu_ids: list[int],
+):
+    pending: list[tuple[int, int]] = [(idx, mode) for idx, mode in enumerate(modes, start=1)]
+    requested_modes = set(modes)
+    completed_modes: set[int] = set()
+    available_gpus = list(gpu_ids)
+    running: dict[Any, tuple[int, int]] = {}
+    errors: list[str] = []
+
+    def _pick_ready_index() -> Optional[int]:
+        for index, (_, mode) in enumerate(pending):
+            dep_mode = specs[mode].pretrained_from_mode
+            if dep_mode is None or dep_mode not in requested_modes or dep_mode in completed_modes:
+                return index
+        return None
+
+    with ThreadPoolExecutor(max_workers=len(gpu_ids)) as pool:
+        while pending or running:
+            launched = False
+            while (not errors) and available_gpus:
+                ready_index = _pick_ready_index()
+                if ready_index is None:
+                    break
+                mode_index, mode = pending.pop(ready_index)
+                gpu_id = available_gpus.pop(0)
+                spec = specs[mode]
+                future = pool.submit(
+                    _train_one_mode,
+                    args=args,
+                    mode=mode,
+                    mode_index=mode_index,
+                    total_modes=len(modes),
+                    spec=spec,
+                    specs=specs,
+                    paths=paths,
+                    timeout_sec=timeout_sec,
+                    logs_dir=logs_dir,
+                    gpu_id=gpu_id,
+                )
+                running[future] = (mode, gpu_id)
+                launched = True
+
+            if not running:
+                if errors:
+                    break
+                if not launched and pending:
+                    blocked = ", ".join(
+                        f"mode {mode} <- {specs[mode].pretrained_from_mode}"
+                        for _, mode in pending
+                    )
+                    raise RuntimeError(f"no schedulable mode found, dependency blocked: {blocked}")
+                continue
+
+            done, _ = wait(set(running.keys()), return_when=FIRST_COMPLETED)
+            for future in done:
+                mode, gpu_id = running.pop(future)
+                available_gpus.append(gpu_id)
+                try:
+                    future.result()
+                    completed_modes.add(mode)
+                except Exception as e:
+                    errors.append(f"mode {mode} on gpu {gpu_id}: {e}")
+
+    if errors:
+        raise RuntimeError("parallel training failed:\n" + "\n".join(errors))
+
+
 def main():
     args = parse_args()
     specs = load_train_specs(Path(args.active_train_yaml).resolve())
@@ -435,43 +513,21 @@ def main():
     log(f"swanlab={bool(args.swanlab)} project={args.swanlab_project}")
 
     paths = setup_nnunet_environment(working_dir=working_dir, output_dir=output_dir, compile_flag="true")
-    run_parallel = bool(gpu_ids) and len(gpu_ids) == len(modes)
-    if run_parallel:
-        log("training_schedule=parallel_one_mode_per_gpu")
-        errors: list[str] = []
-        with ThreadPoolExecutor(max_workers=len(modes)) as pool:
-            future_map = {}
-            for idx, mode in enumerate(modes, start=1):
-                spec = specs[mode]
-                gpu_id = gpu_ids[idx - 1]
-                future = pool.submit(
-                    _train_one_mode,
-                    args=args,
-                    mode=mode,
-                    mode_index=idx,
-                    total_modes=len(modes),
-                    spec=spec,
-                    specs=specs,
-                    paths=paths,
-                    timeout_sec=timeout_sec,
-                    logs_dir=logs_dir,
-                    gpu_id=gpu_id,
-                )
-                future_map[future] = mode
-
-            for future in as_completed(future_map):
-                mode = future_map[future]
-                try:
-                    future.result()
-                except Exception as e:
-                    errors.append(f"mode {mode}: {e}")
-        if errors:
-            raise RuntimeError("parallel training failed:\n" + "\n".join(errors))
+    if gpu_ids:
+        log(f"training_schedule=parallel_queue max_parallel={len(gpu_ids)}")
+        _run_parallel_with_gpu_queue(
+            args=args,
+            modes=modes,
+            specs=specs,
+            paths=paths,
+            timeout_sec=timeout_sec,
+            logs_dir=logs_dir,
+            gpu_ids=gpu_ids,
+        )
     else:
         log("training_schedule=sequential_in_modes_order")
         for idx, mode in enumerate(modes, start=1):
             spec = specs[mode]
-            gpu_id = gpu_ids[(idx - 1) % len(gpu_ids)] if gpu_ids else None
             _train_one_mode(
                 args=args,
                 mode=mode,
@@ -482,7 +538,7 @@ def main():
                 paths=paths,
                 timeout_sec=timeout_sec,
                 logs_dir=logs_dir,
-                gpu_id=gpu_id,
+                gpu_id=None,
             )
 
     log("all requested training modes finished")
