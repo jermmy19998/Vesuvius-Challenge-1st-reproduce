@@ -1,6 +1,7 @@
 import argparse
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Optional
 
@@ -32,6 +33,15 @@ def parse_args():
         default="1,2,5,7",
         help="Comma-separated modes to train, must exist in active_train_yaml.",
     )
+    parser.add_argument(
+        "--gpu_ids",
+        type=str,
+        default="",
+        help=(
+            "Comma-separated GPU ids. If count equals mode count, train modes in parallel "
+            "(one mode per GPU). Otherwise train sequentially in modes order."
+        ),
+    )
     parser.add_argument("--configuration", type=str, default="3d_fullres")
     parser.add_argument("--fold", type=str, default="all")
     parser.add_argument("--command_logs_dir", type=str, default="")
@@ -47,6 +57,22 @@ def _parse_modes(raw: str, available: list[int]) -> list[int]:
     if not raw.strip():
         return sorted(set(int(x) for x in available))
     return [int(x.strip()) for x in raw.split(",") if x.strip()]
+
+
+def _parse_gpu_ids(raw: str) -> list[int]:
+    value = raw.strip()
+    if not value:
+        return []
+    gpu_ids: list[int] = []
+    for item in value.split(","):
+        token = item.strip()
+        if not token:
+            continue
+        gpu_id = int(token)
+        if gpu_id < 0:
+            raise ValueError(f"gpu id must be >= 0, got: {gpu_id}")
+        gpu_ids.append(gpu_id)
+    return gpu_ids
 
 
 def _model_output_dir(results_root: Path, spec: TrainModelSpec, configuration: str, fold: str) -> Path:
@@ -311,10 +337,82 @@ def _finish_swanlab_run(swanlab_mod: Any, run: Any):
         swanlab_mod.finish()
 
 
+def _train_one_mode(
+    args,
+    mode: int,
+    mode_index: int,
+    total_modes: int,
+    spec: TrainModelSpec,
+    specs: dict[int, TrainModelSpec],
+    paths,
+    timeout_sec: Optional[int],
+    logs_dir: Path,
+    gpu_id: Optional[int],
+):
+    log("-" * 60)
+    gpu_desc = f"gpu={gpu_id}" if gpu_id is not None else "gpu=inherit_env"
+    log(f"[{mode_index}/{total_modes}] mode={mode} | {spec.tag} | {gpu_desc}")
+    log(
+        f"dataset={spec.dataset_name} plans={spec.plans_name} trainer={spec.trainer} "
+        f"patch={spec.patch_size} batch={spec.batch_size}"
+    )
+
+    ensure_preprocessed_ready(
+        preprocessed_root=paths.preprocessed,
+        dataset_name=spec.dataset_name,
+        configuration=args.configuration,
+    )
+
+    pretrained_weights = None
+    if spec.pretrained_from_mode is not None:
+        if spec.pretrained_from_mode not in specs:
+            raise ValueError(
+                f"mode {mode} requires pretrained_from_mode={spec.pretrained_from_mode}, "
+                "but it is not in active yaml."
+            )
+        pretrained_weights = _resolve_pretrained_checkpoint(
+            results_root=paths.results,
+            source_spec=specs[spec.pretrained_from_mode],
+            configuration=args.configuration,
+            fold=args.fold,
+        )
+        log(f"pretrained_weights={pretrained_weights}")
+
+    swanlab_mod, swanlab_run = _start_swanlab_run(args=args, mode=mode, spec=spec)
+    try:
+        ok, train_output = run_nnunet_train(
+            dataset_id=spec.dataset_id,
+            configuration=args.configuration,
+            fold=args.fold,
+            plans_name=spec.plans_name,
+            trainer=spec.trainer,
+            pretrained_weights=pretrained_weights,
+            timeout_sec=timeout_sec,
+            logs_dir=logs_dir,
+            gpu_id=gpu_id,
+        )
+
+        if swanlab_mod is not None:
+            log_count = 0
+            for step, metrics in _iter_metric_records(train_output):
+                payload = dict(metrics)
+                payload["epoch"] = float(step)
+                _swanlab_log(swanlab_mod, swanlab_run, payload, step=step)
+                log_count += 1
+            log(f"swanlab logged {log_count} records for mode {mode}")
+
+        if not ok:
+            raise RuntimeError(f"training failed for mode {mode}")
+    finally:
+        if swanlab_mod is not None:
+            _finish_swanlab_run(swanlab_mod, swanlab_run)
+
+
 def main():
     args = parse_args()
     specs = load_train_specs(Path(args.active_train_yaml).resolve())
     modes = _parse_modes(args.modes, list(specs.keys()))
+    gpu_ids = _parse_gpu_ids(args.gpu_ids)
 
     for m in modes:
         if m not in specs:
@@ -331,69 +429,61 @@ def main():
     log(f"output_dir={output_dir}")
     log(f"active_train_yaml={Path(args.active_train_yaml).resolve()}")
     log(f"modes={modes}")
+    log(f"gpu_ids={gpu_ids if gpu_ids else 'inherit_env'}")
     log(f"configuration={args.configuration}, fold={args.fold}")
     log(f"command_logs_dir={logs_dir}")
     log(f"swanlab={bool(args.swanlab)} project={args.swanlab_project}")
 
     paths = setup_nnunet_environment(working_dir=working_dir, output_dir=output_dir, compile_flag="true")
-
-    for idx, mode in enumerate(modes, start=1):
-        spec = specs[mode]
-        log("-" * 60)
-        log(f"[{idx}/{len(modes)}] mode={mode} | {spec.tag}")
-        log(
-            f"dataset={spec.dataset_name} plans={spec.plans_name} trainer={spec.trainer} "
-            f"patch={spec.patch_size} batch={spec.batch_size}"
-        )
-
-        ensure_preprocessed_ready(
-            preprocessed_root=paths.preprocessed,
-            dataset_name=spec.dataset_name,
-            configuration=args.configuration,
-        )
-
-        pretrained_weights = None
-        if spec.pretrained_from_mode is not None:
-            if spec.pretrained_from_mode not in specs:
-                raise ValueError(
-                    f"mode {mode} requires pretrained_from_mode={spec.pretrained_from_mode}, "
-                    "but it is not in active yaml."
+    run_parallel = bool(gpu_ids) and len(gpu_ids) == len(modes)
+    if run_parallel:
+        log("training_schedule=parallel_one_mode_per_gpu")
+        errors: list[str] = []
+        with ThreadPoolExecutor(max_workers=len(modes)) as pool:
+            future_map = {}
+            for idx, mode in enumerate(modes, start=1):
+                spec = specs[mode]
+                gpu_id = gpu_ids[idx - 1]
+                future = pool.submit(
+                    _train_one_mode,
+                    args=args,
+                    mode=mode,
+                    mode_index=idx,
+                    total_modes=len(modes),
+                    spec=spec,
+                    specs=specs,
+                    paths=paths,
+                    timeout_sec=timeout_sec,
+                    logs_dir=logs_dir,
+                    gpu_id=gpu_id,
                 )
-            pretrained_weights = _resolve_pretrained_checkpoint(
-                results_root=paths.results,
-                source_spec=specs[spec.pretrained_from_mode],
-                configuration=args.configuration,
-                fold=args.fold,
-            )
-            log(f"pretrained_weights={pretrained_weights}")
+                future_map[future] = mode
 
-        swanlab_mod, swanlab_run = _start_swanlab_run(args=args, mode=mode, spec=spec)
-        try:
-            ok, train_output = run_nnunet_train(
-                dataset_id=spec.dataset_id,
-                configuration=args.configuration,
-                fold=args.fold,
-                plans_name=spec.plans_name,
-                trainer=spec.trainer,
-                pretrained_weights=pretrained_weights,
+            for future in as_completed(future_map):
+                mode = future_map[future]
+                try:
+                    future.result()
+                except Exception as e:
+                    errors.append(f"mode {mode}: {e}")
+        if errors:
+            raise RuntimeError("parallel training failed:\n" + "\n".join(errors))
+    else:
+        log("training_schedule=sequential_in_modes_order")
+        for idx, mode in enumerate(modes, start=1):
+            spec = specs[mode]
+            gpu_id = gpu_ids[(idx - 1) % len(gpu_ids)] if gpu_ids else None
+            _train_one_mode(
+                args=args,
+                mode=mode,
+                mode_index=idx,
+                total_modes=len(modes),
+                spec=spec,
+                specs=specs,
+                paths=paths,
                 timeout_sec=timeout_sec,
                 logs_dir=logs_dir,
+                gpu_id=gpu_id,
             )
-
-            if swanlab_mod is not None:
-                log_count = 0
-                for step, metrics in _iter_metric_records(train_output):
-                    payload = dict(metrics)
-                    payload["epoch"] = float(step)
-                    _swanlab_log(swanlab_mod, swanlab_run, payload, step=step)
-                    log_count += 1
-                log(f"swanlab logged {log_count} records for mode {mode}")
-
-            if not ok:
-                raise RuntimeError(f"training failed for mode {mode}")
-        finally:
-            if swanlab_mod is not None:
-                _finish_swanlab_run(swanlab_mod, swanlab_run)
 
     log("all requested training modes finished")
 

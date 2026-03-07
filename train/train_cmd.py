@@ -12,8 +12,10 @@ _FFT_CONV_MODULE_REGEX = r"fft_conv_pytorch\.fft_conv"
 _TRAINER_EPOCHS_RE = re.compile(r"nnUNetTrainer_(\d+)epochs$")
 
 
-def _build_train_env() -> dict[str, str]:
+def _build_train_env(gpu_id: Optional[int]) -> dict[str, str]:
     env = os.environ.copy()
+    if gpu_id is not None:
+        env["CUDA_VISIBLE_DEVICES"] = str(int(gpu_id))
     ignore_filter = (
         f"ignore:{_FFT_CONV_TORCH29_DEPRECATION_PREFIX}:UserWarning:{_FFT_CONV_MODULE_REGEX}"
     )
@@ -54,6 +56,7 @@ def run_nnunet_train(
     pretrained_weights: Optional[Path],
     timeout_sec: Optional[int],
     logs_dir: Optional[Path],
+    gpu_id: Optional[int] = None,
 ) -> tuple[bool, str]:
     exe = resolve_command("nnUNetv2_train")
     cmd: list[str] = [
@@ -69,15 +72,19 @@ def run_nnunet_train(
     if pretrained_weights is not None:
         cmd.extend(["-pretrained_weights", str(pretrained_weights)])
 
+    train_name = f"Training_{dataset_id:03d}"
+    if gpu_id is not None:
+        train_name = f"{train_name}_gpu{gpu_id}"
+
     total_epochs = _trainer_total_epochs(trainer)
     ok, merged = run_command(
         cmd=cmd,
-        name="Training",
+        name=train_name,
         timeout_sec=timeout_sec,
         logs_dir=logs_dir,
-        env=_build_train_env(),
+        env=_build_train_env(gpu_id=gpu_id),
         progress=CommandProgress(
-            label="nnUNet training",
+            label=f"nnUNet training {dataset_id:03d}",
             total=total_epochs,
             unit="epochs",
             parse_epoch_from_output=True,
