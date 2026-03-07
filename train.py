@@ -14,11 +14,6 @@ from source.preprocess import ensure_preprocessed_ready
 from source.train.specs import TrainModelSpec, load_train_specs
 from source.train.train_cmd import run_nnunet_train
 
-_FLOAT_RE = r"[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?"
-_EPOCH_RE = re.compile(r"(?i)\bepoch(?:\s+|:|=)\s*(\d+)\b")
-_EPOCH_RATIO_RE = re.compile(r"(?i)\bepoch(?:\s+|:|=)\s*(\d+)\s*/\s*(\d+)\b")
-_KEY_VALUE_RE = re.compile(rf"(?i)\b([a-z][a-z0-9_./-]{{1,48}})\b\s*(?::|=|\s)\s*({_FLOAT_RE})")
-
 
 def parse_args():
     here = THIS_DIR
@@ -30,12 +25,6 @@ def parse_args():
         type=str,
         default=str(here / "configs" / "train" / "models_active_set2.yaml"),
         help="Active training models yaml (used).",
-    )
-    parser.add_argument(
-        "--unused_train_yaml",
-        type=str,
-        default=str(here / "configs" / "train" / "models_unused.yaml"),
-        help="Unused training models yaml (kept separate by request, not executed).",
     )
     parser.add_argument(
         "--modes",
@@ -81,18 +70,26 @@ def _resolve_pretrained_checkpoint(
 
 
 def _extract_epoch(line: str) -> Optional[int]:
-    m_ratio = _EPOCH_RATIO_RE.search(line)
-    if m_ratio:
-        return int(m_ratio.group(1))
-    m = _EPOCH_RE.search(line)
-    if m:
-        return int(m.group(1))
+    tokens = _tokenize_metric_line(line)
+    for idx, token in enumerate(tokens):
+        if token != "epoch":
+            continue
+        for candidate in tokens[idx + 1 : idx + 4]:
+            if "/" in candidate:
+                candidate = candidate.split("/", 1)[0]
+            if candidate.isdigit():
+                value = int(candidate)
+                if value > 0:
+                    return value
     return None
 
 
 def _to_float(raw: str) -> Optional[float]:
+    normalized = raw.strip().rstrip(",;)]}")
+    if not normalized:
+        return None
     try:
-        value = float(raw)
+        value = float(normalized)
     except Exception:
         return None
     if value != value:
@@ -124,31 +121,68 @@ def _normalize_metric_key(raw_key: str) -> Optional[str]:
     return None
 
 
-def _extract_number_after_keyword(line: str, keyword_pattern: str) -> Optional[float]:
-    m = re.search(rf"(?i)\b(?:{keyword_pattern})\b[^0-9+\-]*({_FLOAT_RE})", line)
-    if not m:
-        return None
-    return _to_float(m.group(1))
+def _tokenize_metric_line(line: str) -> list[str]:
+    normalized = line.lower()
+    for sep in (":", "=", ",", "|", "(", ")", "[", "]"):
+        normalized = normalized.replace(sep, " ")
+    return [x for x in normalized.split() if x]
+
+
+def _is_metric_key_candidate(token: str) -> bool:
+    if not token or not token[0].isalpha():
+        return False
+    if len(token) > 48:
+        return False
+    for ch in token:
+        if not (ch.isalnum() or ch in ("_", ".", "-", "/")):
+            return False
+    return True
+
+
+def _extract_number_after_keywords(line: str, keywords: list[str], phrase_keywords: list[tuple[str, ...]]) -> Optional[float]:
+    tokens = _tokenize_metric_line(line)
+    for idx, token in enumerate(tokens):
+        if token in keywords:
+            for candidate in tokens[idx + 1 : idx + 4]:
+                value = _to_float(candidate)
+                if value is not None:
+                    return value
+    for phrase in phrase_keywords:
+        width = len(phrase)
+        for idx in range(0, len(tokens) - width + 1):
+            if tuple(tokens[idx : idx + width]) == phrase:
+                for candidate in tokens[idx + width : idx + width + 3]:
+                    value = _to_float(candidate)
+                    if value is not None:
+                        return value
+    return None
 
 
 def _extract_metrics_from_line(line: str) -> dict[str, float]:
     metrics: dict[str, float] = {}
 
-    for m in _KEY_VALUE_RE.finditer(line):
-        raw_key = m.group(1)
-        raw_value = m.group(2)
-        normalized = _normalize_metric_key(raw_key)
-        if normalized is None:
+    tokens = _tokenize_metric_line(line)
+    for idx in range(0, len(tokens) - 1):
+        raw_key = tokens[idx]
+        if not _is_metric_key_candidate(raw_key):
             continue
+        raw_value = tokens[idx + 1]
         value = _to_float(raw_value)
         if value is None:
+            continue
+        normalized = _normalize_metric_key(raw_key)
+        if normalized is None:
             continue
         metrics[normalized] = value
 
     lower = line.lower()
 
     if "train/loss" not in metrics and "val/loss" not in metrics and "loss" in lower:
-        loss_value = _extract_number_after_keyword(line, "loss")
+        loss_value = _extract_number_after_keywords(
+            line=line,
+            keywords=["loss"],
+            phrase_keywords=[],
+        )
         if loss_value is not None:
             if "val" in lower or "valid" in lower or "validation" in lower:
                 metrics["val/loss"] = loss_value
@@ -156,12 +190,20 @@ def _extract_metrics_from_line(line: str) -> dict[str, float]:
                 metrics["train/loss"] = loss_value
 
     if "train/lr" not in metrics and ("learning rate" in lower or " learning_rate" in lower or " lr" in lower):
-        lr_value = _extract_number_after_keyword(line, "lr|learning\\s*rate|learning_rate")
+        lr_value = _extract_number_after_keywords(
+            line=line,
+            keywords=["lr", "learning_rate"],
+            phrase_keywords=[("learning", "rate")],
+        )
         if lr_value is not None:
             metrics["train/lr"] = lr_value
 
     if "train/metric" not in metrics and "val/metric" not in metrics and ("dice" in lower or "metric" in lower):
-        metric_value = _extract_number_after_keyword(line, "dice|metric")
+        metric_value = _extract_number_after_keywords(
+            line=line,
+            keywords=["dice", "metric"],
+            phrase_keywords=[],
+        )
         if metric_value is not None:
             if "val" in lower or "valid" in lower or "validation" in lower:
                 metrics["val/metric"] = metric_value
@@ -292,10 +334,6 @@ def main():
     log(f"configuration={args.configuration}, fold={args.fold}")
     log(f"command_logs_dir={logs_dir}")
     log(f"swanlab={bool(args.swanlab)} project={args.swanlab_project}")
-
-    unused_yaml = Path(args.unused_train_yaml).resolve()
-    if unused_yaml.exists():
-        log(f"unused_train_yaml exists (kept separate): {unused_yaml}")
 
     paths = setup_nnunet_environment(working_dir=working_dir, output_dir=output_dir, compile_flag="true")
 

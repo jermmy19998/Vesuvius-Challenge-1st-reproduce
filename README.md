@@ -7,13 +7,11 @@ This folder reproduces the solution flow:
 - `infer.py`: inference + ensemble + postprocess (single file)
 - `configs/train/*.yaml`: training model manifest
 - `configs/train/models_active_set2/*.yaml`: one yaml per active model
-- `configs/train/models_unused/*.yaml`: one yaml per unused model
 
 Per request:
 
 - Active training: `configs/train/models_active_set2.yaml`
-- Unused training: `configs/train/models_unused.yaml`
-- Different training models use different yaml files (manifest references per-model yamls)
+- Different active training models use different yaml files (manifest references per-model yamls)
 - Inference uses no yaml (all infer settings come from `infer.py` args/defaults)
 
 ## Train

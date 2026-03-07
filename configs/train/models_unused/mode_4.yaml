@@ -1,8 +1,0 @@
-mode: 4
-tag: XLPlans_100_patch256_final
-planner: nnUNetPlannerResEncXL
-plans_name: nnUNetResEncUNetXLPlans
-trainer: nnUNetTrainer_100epochs
-patch_size: 256
-batch_size: 2
-pretrained_from_mode: 1
