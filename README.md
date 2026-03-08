@@ -14,6 +14,11 @@ Per request:
 - Different active training models use different yaml files (manifest references per-model yamls)
 - Inference uses no yaml (all infer settings come from `infer.py` args/defaults)
 
+## References
+
+- Solution reference: https://www.kaggle.com/competitions/vesuvius-challenge-surface-detection/writeups/1st-place-solution-for-the-vesuvius-challenge-su
+- Notebook reference: https://www.kaggle.com/code/tonylica/nnunet-4-model-7-5-2-1-final-submit-so-long?scriptVersionId=300373304
+
 ## Train
 
 1. Data processing only:
@@ -93,7 +98,7 @@ python source/infer.py \
 - `--fusion_scheme`: `DIRECT_WEIGHTED` or `PAIR_ENSEMBLE`.
 ## Notes
 
-- Inference weights and threshold follow the referenced notebook:
+- Inference weights and threshold follow the notebook reference above:
   - active modes: `7,5,2,1`
   - weights: `0.42, 0.18, 0.28, 0.12`
   - threshold: `0.26`
