@@ -40,6 +40,13 @@ def parse_args():
     )
     parser.add_argument("--configuration", type=str, default="3d_fullres")
     parser.add_argument("--fold", type=str, default="all")
+    parser.add_argument(
+        "--pretrained_ckpt_policy",
+        type=str,
+        default="final",
+        choices=["final", "best", "auto"],
+        help="Checkpoint policy for pretrained_from_mode: final, best, or auto(final->best).",
+    )
     parser.add_argument("--command_logs_dir", type=str, default="")
     parser.add_argument("--timeout_sec", type=int, default=0)
     parser.add_argument("--swanlab", action="store_true")
@@ -84,15 +91,24 @@ def _resolve_pretrained_checkpoint(
     source_spec: TrainModelSpec,
     configuration: str,
     fold: str,
+    policy: str,
 ) -> Path:
     fold_dir = _model_output_dir(results_root, source_spec, configuration, fold)
     c_final = fold_dir / "checkpoint_final.pth"
     c_best = fold_dir / "checkpoint_best.pth"
+    if policy == "final":
+        if c_final.exists():
+            return c_final
+        raise FileNotFoundError(f"pretrained checkpoint (final) not found: {c_final}")
+    if policy == "best":
+        if c_best.exists():
+            return c_best
+        raise FileNotFoundError(f"pretrained checkpoint (best) not found: {c_best}")
     if c_final.exists():
         return c_final
     if c_best.exists():
         return c_best
-    raise FileNotFoundError(f"pretrained checkpoint not found: {fold_dir}")
+    raise FileNotFoundError(f"pretrained checkpoint (auto final->best) not found: {fold_dir}")
 
 
 def _extract_epoch(line: str) -> Optional[int]:
@@ -433,6 +449,7 @@ def _train_one_mode(
             source_spec=specs[spec.pretrained_from_mode],
             configuration=args.configuration,
             fold=args.fold,
+            policy=str(args.pretrained_ckpt_policy),
         )
         log(f"pretrained_weights={pretrained_weights}")
 
@@ -510,6 +527,7 @@ def main():
     log(f"modes={modes}")
     log(f"gpu_ids={gpu_ids if gpu_ids else 'inherit_env'}")
     log(f"configuration={args.configuration}, fold={args.fold}")
+    log(f"pretrained_ckpt_policy={args.pretrained_ckpt_policy}")
     log(f"command_logs_dir={logs_dir}")
     log(f"swanlab={bool(args.swanlab)} project={args.swanlab_project}")
 
