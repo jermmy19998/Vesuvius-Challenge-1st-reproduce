@@ -298,7 +298,7 @@ def _start_swanlab_run(args, mode: int, spec: TrainModelSpec):
 
     try:
         run = swanlab.init(**kwargs)
-    except TypeError:
+    except Exception as init_error:
         fallback_kwargs: dict[str, Any] = {
             "project": str(args.swanlab_project),
             "name": run_name,
@@ -306,7 +306,14 @@ def _start_swanlab_run(args, mode: int, spec: TrainModelSpec):
         }
         if workspace:
             fallback_kwargs["workspace"] = workspace
-        run = swanlab.init(**fallback_kwargs)
+        try:
+            run = swanlab.init(**fallback_kwargs)
+        except Exception as fallback_error:
+            log(
+                "swanlab init failed, skip logging: "
+                f"primary={init_error!r}, fallback={fallback_error!r}"
+            )
+            return None, None
 
     log(f"swanlab run started: {run_name}")
     return swanlab, run
@@ -321,22 +328,71 @@ def _swanlab_log(swanlab_mod: Any, run: Any, payload: dict[str, float], step: in
             run.log(payload, step=step)
             return
         except TypeError:
-            run.log(payload)
-            return
+            try:
+                run.log(payload)
+                return
+            except Exception as e:
+                log(f"swanlab run.log failed, fallback to module log: {e!r}")
+        except Exception as e:
+            log(f"swanlab run.log failed, fallback to module log: {e!r}")
 
     if hasattr(swanlab_mod, "log"):
         try:
             swanlab_mod.log(payload, step=step)
         except TypeError:
-            swanlab_mod.log(payload)
+            try:
+                swanlab_mod.log(payload)
+            except Exception as e:
+                log(f"swanlab module.log failed: {e!r}")
+        except Exception as e:
+            log(f"swanlab module.log failed: {e!r}")
 
 
 def _finish_swanlab_run(swanlab_mod: Any, run: Any):
-    if run is not None and hasattr(run, "finish"):
-        run.finish()
-        return
-    if hasattr(swanlab_mod, "finish"):
-        swanlab_mod.finish()
+    try:
+        if run is not None and hasattr(run, "finish"):
+            run.finish()
+            return
+        if hasattr(swanlab_mod, "finish"):
+            swanlab_mod.finish()
+    except Exception as e:
+        log(f"swanlab finish failed, ignored: {e!r}")
+
+
+def _build_swanlab_line_logger(swanlab_mod: Any, run: Any):
+    step: Optional[int] = None
+    auto_step = 0
+    logged_records = 0
+
+    def _on_line(raw_line: str):
+        nonlocal step, auto_step, logged_records
+        line = raw_line.strip()
+        if not line:
+            return
+
+        epoch = _extract_epoch(line)
+        if epoch is not None and epoch > 0:
+            step = epoch
+
+        metrics = _extract_metrics_from_line(line)
+        if not metrics:
+            return
+
+        if step is None:
+            auto_step += 1
+            current_step = auto_step
+        else:
+            current_step = step
+
+        payload = dict(metrics)
+        payload["epoch"] = float(current_step)
+        _swanlab_log(swanlab_mod, run, payload, step=current_step)
+        logged_records += 1
+
+    def _count() -> int:
+        return logged_records
+
+    return _on_line, _count
 
 
 def _train_one_mode(
@@ -381,6 +437,13 @@ def _train_one_mode(
         log(f"pretrained_weights={pretrained_weights}")
 
     swanlab_mod, swanlab_run = _start_swanlab_run(args=args, mode=mode, spec=spec)
+    swanlab_line_logger = None
+    swanlab_line_count = None
+    if swanlab_mod is not None:
+        swanlab_line_logger, swanlab_line_count = _build_swanlab_line_logger(
+            swanlab_mod=swanlab_mod,
+            run=swanlab_run,
+        )
     try:
         ok, train_output = run_nnunet_train(
             dataset_id=spec.dataset_id,
@@ -392,15 +455,18 @@ def _train_one_mode(
             timeout_sec=timeout_sec,
             logs_dir=logs_dir,
             gpu_id=gpu_id,
+            on_output_line=swanlab_line_logger,
         )
 
         if swanlab_mod is not None:
-            log_count = 0
-            for step, metrics in _iter_metric_records(train_output):
-                payload = dict(metrics)
-                payload["epoch"] = float(step)
-                _swanlab_log(swanlab_mod, swanlab_run, payload, step=step)
-                log_count += 1
+            log_count = swanlab_line_count() if swanlab_line_count is not None else 0
+            # Fallback for environments where line callbacks are unavailable.
+            if log_count == 0:
+                for step, metrics in _iter_metric_records(train_output):
+                    payload = dict(metrics)
+                    payload["epoch"] = float(step)
+                    _swanlab_log(swanlab_mod, swanlab_run, payload, step=step)
+                    log_count += 1
             log(f"swanlab logged {log_count} records for mode {mode}")
 
         if not ok:

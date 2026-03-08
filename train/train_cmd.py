@@ -1,7 +1,7 @@
 import os
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from source.common import CommandProgress, resolve_command, run_command
 
@@ -57,6 +57,7 @@ def run_nnunet_train(
     timeout_sec: Optional[int],
     logs_dir: Optional[Path],
     gpu_id: Optional[int] = None,
+    on_output_line: Optional[Callable[[str], None]] = None,
 ) -> tuple[bool, str]:
     exe = resolve_command("nnUNetv2_train")
     cmd: list[str] = [
@@ -95,6 +96,7 @@ def run_nnunet_train(
             "fft_conv_pytorch/fft_conv.py:139: UserWarning: Using a non-tuple sequence for multidimensional indexing is deprecated",
             "output = output[crop_slices].contiguous()",
         ],
+        on_output_line=on_output_line,
         shell=False,
     )
     return ok, merged

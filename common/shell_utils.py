@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass
 from queue import Empty, Queue
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from .logging_utils import log
 
@@ -132,6 +132,7 @@ def run_command(
     shell: bool = False,
     progress: Optional[CommandProgress] = None,
     suppress_output_substrings: Optional[list[str]] = None,
+    on_output_line: Optional[Callable[[str], None]] = None,
 ) -> tuple[bool, str]:
     if isinstance(cmd, list):
         cmd_display = " ".join(shlex.quote(str(x)) for x in cmd)
@@ -143,6 +144,7 @@ def run_command(
     captured: list[str] = []
     timeout_hit = False
     suppress_terms = [x for x in (suppress_output_substrings or []) if x]
+    callback_warning_printed = False
 
     def _reader(pipe):
         if pipe is None:
@@ -192,6 +194,13 @@ def run_command(
             if not suppressed:
                 captured.append(line)
                 print(line, end="", flush=True)
+                if on_output_line is not None:
+                    try:
+                        on_output_line(line)
+                    except Exception as callback_error:
+                        if not callback_warning_printed:
+                            log(f"{name} output callback error, ignored: {callback_error!r}")
+                            callback_warning_printed = True
 
             if (not suppressed) and progress is not None and progress.parse_epoch_from_output:
                 epoch_cur, epoch_total = _parse_epoch_from_line(line)
@@ -274,6 +283,13 @@ def run_command(
                 continue
             captured.append(line)
             print(line, end="", flush=True)
+            if on_output_line is not None:
+                try:
+                    on_output_line(line)
+                except Exception as callback_error:
+                    if not callback_warning_printed:
+                        log(f"{name} output callback error, ignored: {callback_error!r}")
+                        callback_warning_printed = True
         except Empty:
             break
 

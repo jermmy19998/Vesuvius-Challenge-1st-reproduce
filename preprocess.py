@@ -26,6 +26,34 @@ from source.common import (
 from source.train.specs import load_train_specs
 
 
+
+def parse_args():
+    here = THIS_DIR
+    parser = argparse.ArgumentParser("Vesuvius Surface Detection - Preprocess Only")
+    parser.add_argument("--input_dir", type=str, default="./data")
+    parser.add_argument("--working_dir", type=str, default="./work")
+    parser.add_argument("--output_dir", type=str, default="./output")
+    parser.add_argument(
+        "--active_train_yaml",
+        type=str,
+        default=str(here / "configs" / "train" / "models_active_set2.yaml"),
+        help="Active training models yaml (used).",
+    )
+    parser.add_argument(
+        "--modes",
+        type=str,
+        default="1,2,5,7",
+        help="Comma-separated modes to preprocess, must exist in active_train_yaml.",
+    )
+    parser.add_argument("--configuration", type=str, default="3d_fullres")
+    parser.add_argument("--num_workers", type=int, default=8)
+    parser.add_argument("--max_cases", type=int, default=0)
+    parser.add_argument("--use_copy", action="store_true")
+    parser.add_argument("--force_rebuild_raw", action="store_true")
+    parser.add_argument("--force_rebuild_preprocessed", action="store_true")
+    parser.add_argument("--command_logs_dir", type=str, default="")
+    parser.add_argument("--timeout_sec", type=int, default=0)
+    return parser.parse_args()
 def _prepare_single_pair(
     image_path: Path,
     train_labels_dir: Path,
@@ -292,35 +320,6 @@ def _parse_modes(raw: str, available: list[int]) -> list[int]:
     if not raw.strip():
         return sorted(set(int(x) for x in available))
     return [int(x.strip()) for x in raw.split(",") if x.strip()]
-
-
-def parse_args():
-    here = THIS_DIR
-    parser = argparse.ArgumentParser("Vesuvius Surface Detection - Preprocess Only")
-    parser.add_argument("--input_dir", type=str, default="./data")
-    parser.add_argument("--working_dir", type=str, default="./work")
-    parser.add_argument("--output_dir", type=str, default="./output")
-    parser.add_argument(
-        "--active_train_yaml",
-        type=str,
-        default=str(here / "configs" / "train" / "models_active_set2.yaml"),
-        help="Active training models yaml (used).",
-    )
-    parser.add_argument(
-        "--modes",
-        type=str,
-        default="1,2,5,7",
-        help="Comma-separated modes to preprocess, must exist in active_train_yaml.",
-    )
-    parser.add_argument("--configuration", type=str, default="3d_fullres")
-    parser.add_argument("--num_workers", type=int, default=8)
-    parser.add_argument("--max_cases", type=int, default=0)
-    parser.add_argument("--use_copy", action="store_true")
-    parser.add_argument("--force_rebuild_raw", action="store_true")
-    parser.add_argument("--force_rebuild_preprocessed", action="store_true")
-    parser.add_argument("--command_logs_dir", type=str, default="")
-    parser.add_argument("--timeout_sec", type=int, default=0)
-    return parser.parse_args()
 
 
 def main():
