@@ -1,0 +1,19 @@
+# Core runtime
+numpy>=1.26
+scipy>=1.11
+scikit-image>=0.22
+opencv-python-headless>=4.8
+tifffile>=2024.2
+tqdm>=4.66
+PyYAML>=6.0
+matplotlib>=3.8
+numba>=0.59
+
+# Training / inference
+torch>=2.2
+nnunetv2==2.6.4
+swanlab
+
+# Optional: GPU postprocess (install ONE that matches your CUDA runtime)
+# cupy-cuda12x
+# cupy-cuda11x
