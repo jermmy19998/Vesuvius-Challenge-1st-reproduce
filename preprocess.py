@@ -1,11 +1,17 @@
 import argparse
 import json
+import os
 import shutil
 import sys
 from functools import partial
 from multiprocessing import Pool
 from pathlib import Path
 from typing import Optional
+
+os.environ["OMP_NUM_THREADS"] = "8"
+os.environ["MKL_NUM_THREADS"] = "8"
+os.environ["OPENBLAS_NUM_THREADS"] = "8"
+os.environ["NUMEXPR_NUM_THREADS"] = "8"
 
 THIS_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = THIS_DIR.parent
