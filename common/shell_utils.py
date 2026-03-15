@@ -1,5 +1,6 @@
 import re
 import shlex
+import signal
 import shutil
 import subprocess
 import sys
@@ -120,6 +121,25 @@ def _write_command_log(
             if not stderr.endswith("\n"):
                 f.write("\n")
     return log_path
+
+
+def _build_failure_detail(name: str, returncode: int, timeout_sec: Optional[int]) -> str:
+    if returncode == 124:
+        return f"{name} timeout after {timeout_sec}s"
+
+    if returncode < 0:
+        sig_num = -returncode
+        try:
+            sig_name = signal.Signals(sig_num).name
+        except Exception:
+            sig_name = f"SIG{sig_num}"
+
+        detail = f"{name} terminated by signal {sig_name} ({returncode})"
+        if sig_num == signal.SIGKILL:
+            detail += ". This usually means the OS/runtime killed the process, often due to OOM or an external stop."
+        return detail
+
+    return f"{name} exited with returncode={returncode}"
 
 
 def run_command(
@@ -298,7 +318,9 @@ def run_command(
     stderr = ""
     if timeout_hit:
         returncode = 124
-        stderr = f"{name} timeout after {timeout_sec}s"
+        stderr = _build_failure_detail(name, returncode, timeout_sec)
+    elif returncode != 0:
+        stderr = _build_failure_detail(name, returncode, timeout_sec)
 
     log_path = _write_command_log(logs_dir, name, cmd_display, returncode, stdout, stderr)
     merged = f"{stdout}\n{stderr}"

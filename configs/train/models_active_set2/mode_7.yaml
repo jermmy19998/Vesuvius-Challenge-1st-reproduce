@@ -4,5 +4,5 @@ planner: nnUNetPlannerResEncL
 plans_name: nnUNetResEncUNetLPlans
 trainer: nnUNetTrainer_4000epochs
 patch_size: 192
-batch_size: 2
+batch_size: 1
 pretrained_from_mode: null

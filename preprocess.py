@@ -1,17 +1,14 @@
 import argparse
 import json
-import os
+import pickle
 import shutil
 import sys
+import zipfile
+from dataclasses import dataclass
 from functools import partial
 from multiprocessing import Pool
 from pathlib import Path
 from typing import Optional
-
-os.environ["OMP_NUM_THREADS"] = "8"
-os.environ["MKL_NUM_THREADS"] = "8"
-os.environ["OPENBLAS_NUM_THREADS"] = "8"
-os.environ["NUMEXPR_NUM_THREADS"] = "8"
 
 THIS_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = THIS_DIR.parent
@@ -31,6 +28,13 @@ from source.common import (
 )
 from source.train.specs import load_train_specs
 
+
+@dataclass
+class StageHealthReport:
+    ok: bool
+    missing_case_ids: list[str]
+    broken_case_ids: list[str]
+    issues: list[str]
 
 
 def parse_args():
@@ -60,6 +64,14 @@ def parse_args():
     parser.add_argument("--command_logs_dir", type=str, default="")
     parser.add_argument("--timeout_sec", type=int, default=0)
     return parser.parse_args()
+
+
+def _parse_modes(raw: str, available: list[int]) -> list[int]:
+    if not raw.strip():
+        return sorted(set(int(x) for x in available))
+    return [int(x.strip()) for x in raw.split(",") if x.strip()]
+
+
 def _prepare_single_pair(
     image_path: Path,
     train_labels_dir: Path,
@@ -207,42 +219,185 @@ def run_plan_and_preprocess(
     return ok
 
 
-def validate_preprocessed_stage(stage_dir: Path) -> tuple[bool, str]:
-    pkl_files = sorted(stage_dir.glob("*.pkl"))
-    if not pkl_files:
-        return False, f"no case metadata (.pkl) found in {stage_dir}"
+def _is_valid_pickle(path: Path) -> tuple[bool, str]:
+    try:
+        if path.stat().st_size <= 0:
+            return False, "empty file"
+        with path.open("rb") as f:
+            _ = pickle.load(f)
+        return True, ""
+    except Exception as e:
+        return False, repr(e)
 
-    missing: list[str] = []
-    for pkl in pkl_files:
-        case_id = pkl.stem
+
+def _is_valid_npz(path: Path) -> tuple[bool, str]:
+    try:
+        if path.stat().st_size <= 0:
+            return False, "empty file"
+        import numpy as np
+
+        with np.load(str(path), allow_pickle=False) as z:
+            keys = list(z.keys())
+            if not keys:
+                return False, "npz contains no arrays"
+            arr = z[keys[0]]
+            if getattr(arr, "size", 0) <= 0:
+                return False, "first array is empty"
+        return True, ""
+    except zipfile.BadZipFile as e:
+        return False, repr(e)
+    except Exception as e:
+        return False, repr(e)
+
+
+def _is_valid_b2nd(path: Path) -> tuple[bool, str]:
+    try:
+        if path.stat().st_size <= 0:
+            return False, "empty file"
+        try:
+            import blosc2
+        except Exception:
+            # Fallback when blosc2 is unavailable in the current environment.
+            return True, ""
+
+        arr = blosc2.open(urlpath=str(path), mode="r")
+        shape = getattr(arr, "shape", None)
+        if shape is None:
+            return False, "cannot read b2nd shape"
+        if len(shape) == 0:
+            return False, "b2nd shape is empty"
+        return True, ""
+    except Exception as e:
+        return False, repr(e)
+
+
+def inspect_preprocessed_stage(stage_dir: Path, expected_case_ids: list[str]) -> StageHealthReport:
+    if not stage_dir.exists():
+        return StageHealthReport(
+            ok=False,
+            missing_case_ids=list(expected_case_ids),
+            broken_case_ids=[],
+            issues=[f"missing stage dir: {stage_dir}"],
+        )
+
+    missing_case_ids: set[str] = set()
+    broken_case_ids: set[str] = set()
+    issues: list[str] = []
+
+    for case_id in expected_case_ids:
+        pkl_file = stage_dir / f"{case_id}.pkl"
         npz_file = stage_dir / f"{case_id}.npz"
         data_b2nd_file = stage_dir / f"{case_id}.b2nd"
         seg_b2nd_file = stage_dir / f"{case_id}_seg.b2nd"
 
         has_b2nd = data_b2nd_file.exists() or seg_b2nd_file.exists()
-        if has_b2nd:
-            if not data_b2nd_file.exists():
-                missing.append(data_b2nd_file.name)
-            if not seg_b2nd_file.exists():
-                missing.append(seg_b2nd_file.name)
-        elif not npz_file.exists():
-            missing.append(f"{case_id}.npz_or_b2nd_pair")
-
-    if missing:
-        sample = ", ".join(missing[:20])
-        return (
-            False,
-            f"incomplete preprocessed files under {stage_dir}: "
-            f"{len(missing)} missing (sample: {sample})",
+        has_pair = (
+            pkl_file.exists()
+            and ((data_b2nd_file.exists() and seg_b2nd_file.exists()) or npz_file.exists())
         )
-    return True, ""
+        if not has_pair:
+            missing_case_ids.add(case_id)
+            missing_parts: list[str] = []
+            if not pkl_file.exists():
+                missing_parts.append(pkl_file.name)
+            if has_b2nd:
+                if not data_b2nd_file.exists():
+                    missing_parts.append(data_b2nd_file.name)
+                if not seg_b2nd_file.exists():
+                    missing_parts.append(seg_b2nd_file.name)
+            elif not npz_file.exists():
+                missing_parts.append(f"{case_id}.npz_or_b2nd_pair")
+            issues.append(f"{case_id}: missing {'/'.join(missing_parts)}")
+            continue
+
+        pkl_ok, pkl_msg = _is_valid_pickle(pkl_file)
+        if not pkl_ok:
+            broken_case_ids.add(case_id)
+            issues.append(f"{case_id}: broken {pkl_file.name} ({pkl_msg})")
+            continue
+
+        if has_b2nd:
+            data_ok, data_msg = _is_valid_b2nd(data_b2nd_file)
+            seg_ok, seg_msg = _is_valid_b2nd(seg_b2nd_file)
+            if not data_ok:
+                broken_case_ids.add(case_id)
+                issues.append(f"{case_id}: broken {data_b2nd_file.name} ({data_msg})")
+            if not seg_ok:
+                broken_case_ids.add(case_id)
+                issues.append(f"{case_id}: broken {seg_b2nd_file.name} ({seg_msg})")
+        else:
+            npz_ok, npz_msg = _is_valid_npz(npz_file)
+            if not npz_ok:
+                broken_case_ids.add(case_id)
+                issues.append(f"{case_id}: broken {npz_file.name} ({npz_msg})")
+
+    missing = sorted(missing_case_ids)
+    broken = sorted(broken_case_ids)
+    return StageHealthReport(
+        ok=(len(missing) == 0 and len(broken) == 0),
+        missing_case_ids=missing,
+        broken_case_ids=broken,
+        issues=issues,
+    )
 
 
-def ensure_preprocessed_ready(preprocessed_root: Path, dataset_name: str, configuration: str):
+def _remove_case_preprocessed_files(stage_dir: Path, case_id: str) -> int:
+    removed = 0
+    names = [
+        f"{case_id}.pkl",
+        f"{case_id}.npz",
+        f"{case_id}.npy",
+        f"{case_id}.b2nd",
+        f"{case_id}_seg.b2nd",
+        f"{case_id}_seg.npy",
+        f"{case_id}_seg.npz",
+    ]
+    for name in names:
+        p = stage_dir / name
+        if p.exists():
+            p.unlink()
+            removed += 1
+    return removed
+
+
+def repair_preprocessed_stage(stage_dir: Path, case_ids: list[str]) -> int:
+    total_removed = 0
+    for case_id in sorted(set(case_ids)):
+        total_removed += _remove_case_preprocessed_files(stage_dir, case_id)
+    return total_removed
+
+
+def validate_preprocessed_stage(
+    stage_dir: Path,
+    expected_case_ids: Optional[list[str]] = None,
+) -> tuple[bool, str]:
+    if expected_case_ids is None:
+        pkl_files = sorted(stage_dir.glob("*.pkl"))
+        if not pkl_files:
+            return False, f"no case metadata (.pkl) found in {stage_dir}"
+        expected_case_ids = [p.stem for p in pkl_files]
+
+    report = inspect_preprocessed_stage(stage_dir, expected_case_ids)
+    if report.ok:
+        return True, ""
+    sample = "; ".join(report.issues[:10])
+    return (
+        False,
+        f"preprocessed stage invalid: missing_cases={len(report.missing_case_ids)}, "
+        f"broken_cases={len(report.broken_case_ids)} | sample: {sample}",
+    )
+
+
+def ensure_preprocessed_ready(
+    preprocessed_root: Path,
+    dataset_name: str,
+    configuration: str,
+    expected_case_ids: Optional[list[str]] = None,
+):
     stage_dir = preprocessed_root / dataset_name / f"nnUNetPlans_{configuration}"
     if not stage_dir.exists():
         raise RuntimeError(f"missing preprocessed stage: {stage_dir}")
-    ok, msg = validate_preprocessed_stage(stage_dir)
+    ok, msg = validate_preprocessed_stage(stage_dir, expected_case_ids=expected_case_ids)
     if not ok:
         raise RuntimeError(msg)
     log(f"preprocessed stage ready: {stage_dir}")
@@ -322,12 +477,6 @@ def override_patch_and_batch(
     )
 
 
-def _parse_modes(raw: str, available: list[int]) -> list[int]:
-    if not raw.strip():
-        return sorted(set(int(x) for x in available))
-    return [int(x.strip()) for x in raw.split(",") if x.strip()]
-
-
 def main():
     args = parse_args()
     specs = load_train_specs(Path(args.active_train_yaml).resolve())
@@ -387,8 +536,37 @@ def main():
             shutil.rmtree(preprocessed_dataset_dir)
 
         stage_dir = preprocessed_dataset_dir / f"nnUNetPlans_{args.configuration}"
-        if not stage_dir.exists():
-            expected_cases = len(list((dataset_dir / "imagesTr").glob("*.tif")))
+        expected_case_ids = sorted(
+            p.name.replace("_0000.tif", "") for p in (dataset_dir / "imagesTr").glob("*_0000.tif")
+        )
+        expected_cases = len(expected_case_ids)
+
+        needs_preprocess = not stage_dir.exists()
+        if not needs_preprocess:
+            report = inspect_preprocessed_stage(stage_dir, expected_case_ids=expected_case_ids)
+            if report.ok:
+                log(
+                    f"preprocessed stage is healthy: {stage_dir} "
+                    f"(cases={expected_cases})"
+                )
+            else:
+                needs_preprocess = True
+                sample = "; ".join(report.issues[:10])
+                log(
+                    "preprocessed stage has missing/broken files, auto-repair enabled: "
+                    f"missing_cases={len(report.missing_case_ids)}, "
+                    f"broken_cases={len(report.broken_case_ids)}"
+                )
+                if sample:
+                    log(f"issue sample: {sample}")
+                cases_to_rebuild = sorted(set(report.missing_case_ids + report.broken_case_ids))
+                removed = repair_preprocessed_stage(stage_dir, case_ids=cases_to_rebuild)
+                log(
+                    f"removed stale/corrupted files: {removed} "
+                    f"(cases_to_rebuild={len(cases_to_rebuild)})"
+                )
+
+        if needs_preprocess:
             ok = run_plan_and_preprocess(
                 dataset_id=spec.dataset_id,
                 planner=spec.planner,
@@ -406,6 +584,7 @@ def main():
             preprocessed_root=paths.preprocessed,
             dataset_name=spec.dataset_name,
             configuration=args.configuration,
+            expected_case_ids=expected_case_ids,
         )
         override_patch_and_batch(
             preprocessed_root=paths.preprocessed,

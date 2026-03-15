@@ -7,18 +7,62 @@ This folder reproduces the solution flow:
 - `infer.py`: inference + ensemble + postprocess (single file)
 - `configs/train/*.yaml`: training model manifest
 - `configs/train/models_active_set2/*.yaml`: one yaml per active model
+- `configs/train/models_unused/*.yaml`: one yaml per unused model
 
 Per request:
 
 - Active training: `configs/train/models_active_set2.yaml`
-- Different active training models use different yaml files (manifest references per-model yamls)
+- Unused training: `configs/train/models_unused.yaml`
+- Different training models use different yaml files (manifest references per-model yamls)
 - Inference uses no yaml (all infer settings come from `infer.py` args/defaults)
 
-## References
+## Kaggle Install Fix (acvl-utils / connected-components-3d)
 
-- Solution reference: https://www.kaggle.com/competitions/vesuvius-challenge-surface-detection/writeups/1st-place-solution-for-the-vesuvius-challenge-su
-- Notebook reference: https://www.kaggle.com/code/tonylica/nnunet-4-model-7-5-2-1-final-submit-so-long?scriptVersionId=300373304
+If Kaggle shows:
 
+```text
+ERROR: Could not find a version that satisfies the requirement connected-components-3d (from acvl-utils)
+ERROR: No matching distribution found for connected-components-3d
+```
+
+use this setup cell first (and make sure Notebook Internet is enabled):
+
+```python
+import sys
+import subprocess
+
+
+def run(cmd):
+    print("+", " ".join(cmd))
+    subprocess.check_call(cmd)
+
+
+run([sys.executable, "-m", "pip", "install", "-U", "pip", "setuptools", "wheel"])
+run([
+    sys.executable,
+    "-m",
+    "pip",
+    "install",
+    "--no-cache-dir",
+    "--index-url",
+    "https://pypi.org/simple",
+    "connected-components-3d==3.26.1",
+])
+run([
+    sys.executable,
+    "-m",
+    "pip",
+    "install",
+    "--no-cache-dir",
+    "--index-url",
+    "https://pypi.org/simple",
+    "acvl-utils==0.2.5",
+    "nnunetv2==2.6.4",
+])
+
+import cc3d
+print("cc3d ok:", cc3d.__version__)
+```
 ## Train
 
 1. Data processing only:
@@ -38,21 +82,8 @@ python source/preprocess.py \
 python source/train.py \
   --working_dir ./work \
   --output_dir ./output \
-  --modes 1 \
-  --gpu_ids 0 \
-  --swanlab
+  --modes 1,2,5,7
 ```
-
-3. Multi-process launch (one mode per process):
-
-```bash
-nohup python ./source/train.py --modes 1 --gpu_ids 0 --swanlab > ./source/train_m1.log 2>&1 &
-nohup python ./source/train.py --modes 2 --gpu_ids 1 --swanlab > ./source/train_m2.log 2>&1 &
-nohup python ./source/train.py --modes 5 --gpu_ids 2 --swanlab > ./source/train_m5.log 2>&1 &
-nohup python ./source/train.py --modes 7 --gpu_ids 3 --swanlab > ./source/train_m7.log 2>&1 &
-```
-
-`mode 2` and `mode 5` require pretrained checkpoints from `mode 1`.
 
 ## Infer (4-model 7/5/2/1)
 
@@ -80,12 +111,9 @@ python source/infer.py \
 - `train.py`
 - `--working_dir`: Preprocessed data workspace. Default: `./work`.
 - `--output_dir`: Output root for training artifacts. Default: `./output`.
-- `--modes`: Single mode per run, for example `1`.
-- `--gpu_ids`: Single GPU id per run, for example `0`.
+- `--modes`: Comma-separated mode list to train.
 - `--configuration`: nnUNet configuration name. Default: `3d_fullres`.
 - `--fold`: Fold selection. Default: `all`.
-- `--swanlab`: Enable SwanLab logging for loss/metric/lr.
-- `--swanlab_run_prefix`: Optional SwanLab name prefix. Default: empty.
 
 - `infer.py` (main)
 - `--input_dir`: Test data root (expects `test_images`). Default: `./data`.
@@ -98,7 +126,7 @@ python source/infer.py \
 - `--fusion_scheme`: `DIRECT_WEIGHTED` or `PAIR_ENSEMBLE`.
 ## Notes
 
-- Inference weights and threshold follow the notebook reference above:
+- Inference weights and threshold follow the referenced notebook:
   - active modes: `7,5,2,1`
   - weights: `0.42, 0.18, 0.28, 0.12`
   - threshold: `0.26`
@@ -112,5 +140,6 @@ python source/infer.py \
   - `close_perp=7`
 - The final submission file is `<output_dir>/submission.zip`.
 - `working_dir` is scratch space for intermediate files (`test_input`, per-mode `npz`, temporary TIFFs).
+
 
 

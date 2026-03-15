@@ -3,7 +3,7 @@ import re
 from pathlib import Path
 from typing import Callable, Optional
 
-from source.common import CommandProgress, log, resolve_command, run_command
+from source.common import CommandProgress, resolve_command, run_command
 
 _FFT_CONV_TORCH29_DEPRECATION_PREFIX = (
     "Using a non-tuple sequence for multidimensional indexing is deprecated"
@@ -12,10 +12,14 @@ _FFT_CONV_MODULE_REGEX = r"fft_conv_pytorch\.fft_conv"
 _TRAINER_EPOCHS_RE = re.compile(r"nnUNetTrainer_(\d+)epochs$")
 
 
-def _build_train_env(gpu_id: Optional[int]) -> dict[str, str]:
+def _build_train_env(gpu_id: Optional[int], n_proc_da: Optional[int]) -> dict[str, str]:
     env = os.environ.copy()
     if gpu_id is not None:
         env["CUDA_VISIBLE_DEVICES"] = str(int(gpu_id))
+    if n_proc_da is not None and int(n_proc_da) > 0:
+        env["nnUNet_n_proc_DA"] = str(int(n_proc_da))
+    else:
+        env.pop("nnUNet_n_proc_DA", None)
     ignore_filter = (
         f"ignore:{_FFT_CONV_TORCH29_DEPRECATION_PREFIX}:UserWarning:{_FFT_CONV_MODULE_REGEX}"
     )
@@ -54,9 +58,11 @@ def run_nnunet_train(
     plans_name: str,
     trainer: str,
     pretrained_weights: Optional[Path],
+    resume: bool,
     timeout_sec: Optional[int],
     logs_dir: Optional[Path],
     gpu_id: Optional[int] = None,
+    n_proc_da: Optional[int] = None,
     on_output_line: Optional[Callable[[str], None]] = None,
 ) -> tuple[bool, str]:
     exe = resolve_command("nnUNetv2_train")
@@ -72,17 +78,12 @@ def run_nnunet_train(
     ]
     if pretrained_weights is not None:
         cmd.extend(["-pretrained_weights", str(pretrained_weights)])
+    if resume:
+        cmd.append("--c")
 
     train_name = f"Training_{dataset_id:03d}"
     if gpu_id is not None:
         train_name = f"{train_name}_gpu{gpu_id}"
-
-    train_env = _build_train_env(gpu_id=gpu_id)
-    visible = train_env.get("CUDA_VISIBLE_DEVICES", "<inherit>")
-    log(
-        f"{train_name} env | CUDA_VISIBLE_DEVICES={visible} "
-        "(inside this process, torch may report device as cuda:0)"
-    )
 
     total_epochs = _trainer_total_epochs(trainer)
     ok, merged = run_command(
@@ -90,7 +91,7 @@ def run_nnunet_train(
         name=train_name,
         timeout_sec=timeout_sec,
         logs_dir=logs_dir,
-        env=train_env,
+        env=_build_train_env(gpu_id=gpu_id, n_proc_da=n_proc_da),
         progress=CommandProgress(
             label=f"nnUNet training {dataset_id:03d}",
             total=total_epochs,
